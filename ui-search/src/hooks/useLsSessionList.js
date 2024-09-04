@@ -1,8 +1,6 @@
 import { useCallback } from 'react';
 import { LSK } from 'src/constants';
 import useLsArray from './useLsArray';
-import PROMPT_TEMPLATES from 'src/utils/PROMPT_TEMPLATES';
-import backup_convo from 'src/utils/backup';
 
 const useLsSessionList = () => {
   const {
@@ -13,8 +11,7 @@ const useLsSessionList = () => {
     getById: lsGetSessionItem,
     delById: lsDelSessionItem,
     updateById: lsUpdateSessionItem,
-  } = useLsArray(LSK.sessionList, 'sessionId', PROMPT_TEMPLATES);
-  // } = useLsArray(LSK.sessionList, 'sessionId', backup_convo);
+  } = useLsArray(LSK.sessionList, 'sessionId');
 
   const lsGetCurSessionConfig = useCallback((sessionId, sessionList) => {
     let configs = null;
@@ -37,22 +34,24 @@ const useLsSessionList = () => {
   );
 
   const lsUpdateContentOfLastConvoInOneSessionItem = useCallback(
-    (sessionId, sessionList, data, flagFirstStream = false) => {
+    (sessionId, sessionList, data, firstStream = false) => {
       const curSession = lsGetSessionItem(sessionId, sessionList);
-      // validate whether this sessionId exists
       if (curSession) {
-        if (flagFirstStream) {
-          // if streaming and it is the first stream, add a new robot convo to the session item
+        if (firstStream) {
           curSession.conversations = curSession.conversations.concat({
             type: 'robot',
             content: data,
           });
+          lsUpdateSessionItem(sessionId, curSession);
         } else {
-          // otherwise, update the last robot convo in the session item
-          curSession.conversations[
-            curSession.conversations.length - 1
-          ].content = data;
+          curSession.conversations[curSession.conversations.length - 1] = {
+            type: 'robot',
+            content: data,
+          };
         }
+        // TESTING: see if this works
+        // curSession.conversations[curSession.conversations.length - 1].content =
+        //   data;
         lsUpdateSessionItem(sessionId, curSession);
       } else {
         throw new Error(`No session found with ID: ${sessionId}`);

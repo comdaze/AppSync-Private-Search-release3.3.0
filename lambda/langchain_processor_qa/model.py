@@ -4,7 +4,7 @@ from sagemaker_endpoint import SagemakerEndpoint
 from sagemaker_endpoint import LLMContentHandler
 # from langchain.llms import Bedrock
 from bedrock import Bedrock
-from bedrock_embedding import BedrockEmbeddings
+from langchain.embeddings import BedrockEmbeddings
 from langchain.callbacks.manager import CallbackManagerForLLMRun
 from langchain.llms.utils import enforce_stop_tokens
 # from langchain.vectorstores import OpenSearchVectorSearch
@@ -18,27 +18,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 from langchain.callbacks.manager import CallbackManagerForChainRun
 import inspect 
 
-import time
-time_seq=1
-last_time=time.time()
-init_time=last_time
-def printTime(title):
-    global time_seq
-    global last_time
-    global init_time
-    #重置时间
-    if time_seq==1:
-        last_time=round(time.time(), 3)
-        init_time=last_time
-    current_time=round(time.time(), 3)
-    print(f"printTime{time_seq}:{title}:{current_time}:{round(current_time-init_time,3)}:{round(current_time-last_time,3)}")
-    time_seq=time_seq+1
-    last_time=current_time
-def clearTime():
-    global time_seq
-    time_seq=1
-
-
 def init_embeddings(endpoint_name,region_name,language: str = "chinese"):
     
     class ContentHandler(EmbeddingsContentHandler):
@@ -46,10 +25,7 @@ def init_embeddings(endpoint_name,region_name,language: str = "chinese"):
         accepts = "application/json"
 
         def transform_input(self, inputs: List[str], model_kwargs: Dict) -> bytes:
-            instruction = "为这个句子生成表示以用于检索相关文章："
-            if language == 'english':
-                instruction = "Represent this sentence for searching relevant passages:"
-            input_str = json.dumps({"inputs": inputs, "is_query":True,"instruction":instruction, **model_kwargs})
+            input_str = json.dumps({"inputs": inputs, **model_kwargs})
             return input_str.encode('utf-8')
 
         def transform_output(self, output: bytes) -> List[List[float]]:
@@ -78,7 +54,7 @@ def init_vector_store(embeddings,
 
     vector_store = OpenSearchVectorSearch(
         index_name=index_name,
-        embedding_function=embeddings,
+        embedding_function=embeddings, 
         opensearch_url="aws-opensearch-url",
         hosts = [{'host': opensearch_host, 'port': opensearch_port}],
         http_auth = (opensearch_user_name, opensearch_user_password),
@@ -247,7 +223,7 @@ def init_model_llama2(endpoint_name,region_name,temperature):
         return llm
     except Exception as e:
         return None
-
+    
 def init_model_bedrock(model_id):
     try:
         llm = Bedrock(model_id=model_id)
@@ -290,17 +266,11 @@ def new_conversational_call(
         inputs: Dict[str, Any],
         run_manager: Optional[CallbackManagerForChainRun] = None,
     ) -> Dict[str, Any]:
-    printTime("begin get_chat_history")
     _run_manager = run_manager or CallbackManagerForChainRun.get_noop_manager()
     question = inputs["question"]
     get_chat_history = self.get_chat_history or _get_chat_history
     chat_history_str = get_chat_history(inputs["chat_history"])
-    printTime("begin rewrite")
-    
-    search_engine = "opensearch"
-    if "search_engine" in inputs.keys():
-        search_engine = inputs["search_engine"]   
-    
+
     if chat_history_str:
         callbacks = _run_manager.get_child()
         new_question = self.question_generator.run(
@@ -311,7 +281,6 @@ def new_conversational_call(
     accepts_run_manager = (
         "run_manager" in inspect.signature(self._get_docs).parameters
     )
-    printTime("begin retrieve")
     if accepts_run_manager:
         docs = self._get_docs(new_question, inputs, run_manager=_run_manager)
     else:
@@ -324,15 +293,10 @@ def new_conversational_call(
         if self.rephrase_question:
             new_inputs["question"] = new_question
         new_inputs["chat_history"] = chat_history_str
-        printTime("begin llm")
         
-        if search_engine == "kendra":
-            docs_to_llm = docs
-        else:
-            docs_to_llm = [doc[0] for doc in docs]        
-        
+        docs_without_score = [doc[0] for doc in docs]
         answer = self.combine_docs_chain.run(
-            input_documents=docs_to_llm, callbacks=_run_manager.get_child(), **new_inputs
+            input_documents=docs_without_score, callbacks=_run_manager.get_child(), **new_inputs
         )
         output[self.output_key] = answer
 
