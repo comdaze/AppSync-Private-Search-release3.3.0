@@ -44,18 +44,14 @@ def _import_not_found_error() -> Any:
     except ImportError:
         raise ImportError(IMPORT_OPENSEARCH_PY_ERROR)
     return NotFoundError
-global_opensearch_client=None
+
 def _get_opensearch_client(opensearch_url: str, **kwargs: Any) -> Any:
     """Get OpenSearch client from the opensearch_url, otherwise raise error."""
-    global global_opensearch_client
-    if global_opensearch_client is not None:
-        return global_opensearch_client
     try:
         opensearch = _import_opensearch()
         hosts = kwargs.get("hosts",[])
         http_auth = kwargs.get("http_auth",[])
         client = opensearch(hosts=hosts,http_auth=http_auth,use_ssl = True,timeout=600)
-        global_opensearch_client=client
     except ValueError as e:
         raise ImportError(
             f"OpenSearch client string provided is not in proper format. "
@@ -317,8 +313,6 @@ def _get_aos_docs(question,
                   host,
                   docs_num,
                   text_field,
-                  image_field,
-                  work_mode,
                   metadata_field
                   ) -> List[Document]:
     import json
@@ -355,21 +349,11 @@ def _get_aos_docs(question,
            #Remove duplicate paragraph
             clean.append(document_paragraph)
             document_paragraph = "\n".join(document_paragraph)
-            if work_mode == 'multi-modal':
-                image = hit['_source'][image_field]
-                aos_docs.append(
-                    (Document(page_content=document_paragraph,metadata=document_metadata),
-                     document_score,
-                     image
-                    )
-                   )
-            
-            else:
-                aos_docs.append(
-                                (Document(page_content=document_paragraph,metadata=document_metadata),
-                                 document_score
-                                )
-                               )
+            aos_docs.append(
+                            (Document(page_content=document_paragraph,metadata=document_metadata),
+                             document_score
+                            )
+                           )
     aos_docs = sorted(aos_docs, key=lambda x: x[1], reverse=True)
     aos_docs = aos_docs[:docs_num]
     return aos_docs
@@ -478,11 +462,7 @@ class OpenSearchVectorSearch(VectorStore):
             text_field: Document field the text of the document is stored in. Defaults
             to "text".
         """
-        embedding_type = kwargs.get("embedding_type", "sagemaker")
-        if embedding_type == 'bedrock':
-            embeddings = self.embedding_function.embed_documents(list(texts))
-        else:
-            embeddings = self.embedding_function.embed_documents(list(texts),chunk_size=10)
+        embeddings = self.embedding_function.embed_documents(list(texts))
         return self.__add(
             texts,
             embeddings,
@@ -492,46 +472,6 @@ class OpenSearchVectorSearch(VectorStore):
             **kwargs,
         )
 
-    def add_texts_sentence_in_metadata(
-        self,
-        texts: Iterable[str],
-        metadatas: Optional[List[dict]] = None,
-        ids: Optional[List[str]] = None,
-        bulk_size: int = 500,
-        **kwargs: Any,
-    ) -> List[str]:
-        """Run more texts through the embeddings and add to the vectorstore.
-
-        Args:
-            texts: Iterable of strings to add to the vectorstore.
-            metadatas: Optional list of metadatas associated with the texts.
-            ids: Optional list of ids to associate with the texts.
-            bulk_size: Bulk API request count; Default: 500
-
-        Returns:
-            List of ids from adding the texts into the vectorstore.
-
-        Optional Args:
-            vector_field: Document field embeddings are stored in. Defaults to
-            "vector_field".
-
-            text_field: Document field the text of the document is stored in. Defaults
-            to "text".
-        """
-        embedding_type = kwargs.get("embedding_type", "sagemaker")
-        if embedding_type == 'bedrock':
-            embeddings = self.embedding_function.embed_documents(list([metadata["sentence"] for metadata in metadatas]))
-        else:
-            embeddings = self.embedding_function.embed_documents(list([metadata["sentence"] for metadata in metadatas]),chunk_size=10)
-        return self.__add(
-            texts,
-            embeddings,
-            metadatas=metadatas,
-            ids=ids,
-            bulk_size=bulk_size,
-            **kwargs,
-        )        
-   
     def add_embeddings(
         self,
         text_embeddings: Iterable[Tuple[str, List[float]]],
@@ -568,17 +508,6 @@ class OpenSearchVectorSearch(VectorStore):
             bulk_size=bulk_size,
             **kwargs,
         )
-        
-    def doc_filter_by_source(self, docs:List[Document],k:int = 4)-> List[Document]:
-        source_set = set()
-        new_docs = []
-        for doc in docs:
-            if 'source' in doc[0].metadata.keys() and doc[0].metadata['source'] not in source_set:
-                source_set.add(doc[0].metadata['source'])
-                new_docs.append(doc)
-                if len(new_docs) >= k:
-                    break
-        return new_docs
 
     def similarity_search(
         self, query: str, k: int = 4, **kwargs: Any
@@ -643,14 +572,6 @@ class OpenSearchVectorSearch(VectorStore):
         txt_docs_num = int(kwargs.get("txt_docs_num", "0"))
         vec_docs_score_thresholds = float(kwargs.get("vec_docs_score_thresholds", "0"))
         txt_docs_score_thresholds = float(kwargs.get("txt_docs_score_thresholds", "0"))
-        
-        work_mode = kwargs.get("work_mode", "text-modal")
-        image_field = kwargs.get("image_field", "image_base64")
-        
-        source_filter = kwargs.get("source_filter", False)
-        if source_filter:
-            k = 3*k
-            txt_docs_num = 3*txt_docs_num
  
         vec_docs = []
         aos_docs = []
@@ -662,14 +583,13 @@ class OpenSearchVectorSearch(VectorStore):
             aos_host = self.hosts[0]['host']
             text_field = kwargs.get("text_field", "text")
             metadata_field = kwargs.get("metadata_field", "metadata")
-            aos_docs = _get_aos_docs(query,self.index_name,self.http_auth,aos_host,txt_docs_num,text_field,image_field,work_mode,metadata_field)
+            aos_docs = _get_aos_docs(query,self.index_name,self.http_auth,aos_host,txt_docs_num,text_field,metadata_field)
      
         if len(vec_docs+aos_docs) > 0:
             new_vec_docs = []
             new_aos_docs = []
-            if search_method != "text" and len(vec_docs) > 0:              
+            if search_method != "text" and len(vec_docs) > 0 and vec_docs_score_thresholds > 0:              
                 for doc in vec_docs:
-                    doc[1] = float(doc[1]) if float(doc[1]) < 1 else float(doc[1])/100
                     if float(doc[1]) >= vec_docs_score_thresholds:
                         new_vec_docs.append(doc)
             else:
@@ -683,23 +603,11 @@ class OpenSearchVectorSearch(VectorStore):
                 new_aos_docs = aos_docs
             
             if search_method == "text":
-                if source_filter:
-                    docs_with_scores = self.doc_filter_by_source(new_aos_docs,txt_docs_num) 
-                else:
-                    docs_with_scores = new_aos_docs
+                docs_with_scores = new_aos_docs
             elif search_method == "mix":
-                if source_filter:
-                    docs_with_scores = self.doc_filter_by_source(new_vec_docs + new_aos_docs,k + txt_docs_num)
-                else:
-                    docs_with_scores = new_vec_docs + new_aos_docs
+                docs_with_scores = new_vec_docs + new_aos_docs
             else:
-                if source_filter:
-                    docs_with_scores = self.doc_filter_by_source(new_vec_docs,k)
-                else:
-                    docs_with_scores = new_vec_docs   
-                    
-                print('new_vec_docs:',new_vec_docs)
-                print('docs_with_scores:',docs_with_scores)
+                docs_with_scores = new_vec_docs     
         
         return docs_with_scores        
         # return [doc[0] for doc in docs_with_scores]
@@ -727,39 +635,21 @@ class OpenSearchVectorSearch(VectorStore):
         text_field = kwargs.get("text_field", "text")
         metadata_field = kwargs.get("metadata_field", "metadata")
         embedding_type = kwargs.get("embedding_type", "sagemaker")
-        work_mode = kwargs.get("work_mode", "text-modal")
-        image_field = kwargs.get("image_field", "image_base64")
 
         hits = self._raw_similarity_search_with_score(query=query, k=k, **kwargs)
-        
-        if work_mode == 'multi-modal':
-            documents_with_scores = [
-                [
-                    Document(
-                        page_content=hit["_source"][text_field][0] if isinstance(hit["_source"][text_field],list)  else hit["_source"][text_field],
-                        metadata=hit["_source"]
-                        if metadata_field == "*" or metadata_field not in hit["_source"]
-                        else hit["_source"][metadata_field],
-                    ),
-                    hit["_score"] * 100  if embedding_type == 'bedrock' else hit["_score"],
-                    hit["_source"][image_field][0] if image_field in hit["_source"].keys() and isinstance(hit["_source"][image_field],list)  else (hit["_source"][image_field] if image_field in hit["_source"].keys() else '') 
-                ]
-                for hit in hits
-            ]
-            
-        else:
-            documents_with_scores = [
-                [
-                    Document(
-                        page_content=hit["_source"][text_field][0] if isinstance(hit["_source"][text_field],list)  else hit["_source"][text_field],
-                        metadata=hit["_source"]
-                        if metadata_field == "*" or metadata_field not in hit["_source"]
-                        else hit["_source"][metadata_field],
-                    ),
-                    hit["_score"] * 100  if embedding_type == 'bedrock' else hit["_score"],
-                ]
-                for hit in hits
-            ]
+
+        documents_with_scores = [
+            (
+                Document(
+                    page_content=hit["_source"][text_field][0] if isinstance(hit["_source"][text_field],list)  else hit["_source"][text_field],
+                    metadata=hit["_source"]
+                    if metadata_field == "*" or metadata_field not in hit["_source"]
+                    else hit["_source"][metadata_field],
+                ),
+                hit["_score"] * 100  if embedding_type == 'bedrock' else hit["_score"],
+            )
+            for hit in hits
+        ]
         return documents_with_scores
 
     def _raw_similarity_search_with_score(

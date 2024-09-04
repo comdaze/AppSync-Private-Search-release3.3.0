@@ -43,7 +43,7 @@ class SmartSearchQA:
                 ):
         self.language = language
         self.search_engine = search_engine
-        self.embedding_type = 'bedrock' if (embedding_endpoint_name.find('amazon.titan') >=0 or embedding_endpoint_name.find('cohere.embed') >= 0) else 'sagemaker'
+        self.embedding_type = 'bedrock' if embedding_endpoint_name == 'bedrock-titan-embed' else 'sagemaker'
 
         #add aos parmeter
         self.aos_index = opensearch_index_name
@@ -54,7 +54,6 @@ class SmartSearchQA:
         #when streaming output, this llm should be different from self.llm
         self.condense_question_llm=None
 
-        printTime("before init llm")
         #init LLM
         if model_type == "llama2":
             self.llm = init_model_llama2(llm_endpoint_name,region,temperature)
@@ -62,9 +61,13 @@ class SmartSearchQA:
             self.llm = AmazonAPIGateway(api_url=api_url)
             parameters={
                 "modelId":model_name,
-                "temperature":temperature,
-                "max_tokens":max_tokens
-            }       
+                "temperature":temperature
+            }
+            provider = model_name.split(".")[0]
+            if provider == "anthropic":
+                parameters['max_tokens_to_sample'] = max_tokens
+            elif provider == "meta":
+                parameters['max_gen_len'] = max_tokens        
             self.llm.model_kwargs = parameters
         elif model_type == "bedrock":
             if streaming:
@@ -73,9 +76,13 @@ class SmartSearchQA:
             else:
                 self.llm = init_model_bedrock(model_name)
             parameters={
-                "temperature":temperature,
-                "max_tokens":max_tokens
+                "temperature":temperature
             }
+            provider = model_name.split(".")[0]
+            if provider == "anthropic":
+                parameters['max_tokens_to_sample'] = max_tokens
+            elif provider == "meta":
+                parameters['max_gen_len'] = max_tokens
             self.llm.model_kwargs = parameters
         elif model_type == 'llm_api':
             if model_name.find('Baichuan2') >= 0:
@@ -100,15 +107,13 @@ class SmartSearchQA:
             else:
                 self.llm = init_model(llm_endpoint_name,region,temperature)
 
-        printTime("before init embedding")
         #init embedding model
         if self.search_engine != "kendra":
             if self.embedding_type == 'sagemaker':
                 self.embeddings = init_embeddings(embedding_endpoint_name, region, self.language)
             elif self.embedding_type == 'bedrock':
-                self.embeddings = init_embeddings_bedrock(embedding_endpoint_name)
+                self.embeddings = init_embeddings_bedrock()
 
-        printTime("before init vector store")
         #init vector store
         if self.search_engine == "opensearch":
             print("init opensearch vector store")
@@ -220,8 +225,6 @@ class SmartSearchQA:
                            txt_docs_score_thresholds: float=0,
                            text_field: str="text",
                            vector_field: str="vector_field",
-                           image_field: str="image_base64",
-                           work_mode: str="text-modal"
                      ):
         
         if self.search_engine == "opensearch":
@@ -232,9 +235,7 @@ class SmartSearchQA:
                                                                       "txt_docs_score_thresholds":txt_docs_score_thresholds,
                                                                       "text_field":text_field,
                                                                       "vector_field":vector_field,
-                                                                      "embedding_type":self.embedding_type,
-                                                                      "image_field":image_field,
-                                                                      "work_mode":work_mode
+                                                                      "embedding_type":self.embedding_type
                                                                       }
                                                        )
         elif self.search_engine == "kendra":
@@ -247,9 +248,7 @@ class SmartSearchQA:
                                                                       "txt_docs_score_thresholds":txt_docs_score_thresholds,
                                                                       "text_field":text_field,
                                                                       "vector_field":vector_field,
-                                                                      "embedding_type":self.embedding_type,
-                                                                      "image_field":image_field,
-                                                                      "work_mode":work_mode
+                                                                      "embedding_type":self.embedding_type
                                                                       }
                                                        )
             
@@ -277,7 +276,6 @@ class SmartSearchQA:
         prompt = PromptTemplate(template=prompt_template,
                                 input_variables=["context", "question"])
         combine_docs_chain_kwargs={"prompt":prompt}
-        printTime("get_answer_from_conversational enter")
         
         history = []
         session_info = ""
@@ -291,13 +289,10 @@ class SmartSearchQA:
                         history.append((item[0],item[1]))
         
         print('history:',history)
-        if len(history) > 0:
-            self.llm.model_kwargs['history'] = history
-        
         retriever = self.get_retriever(top_k,search_method,txt_docs_num,vec_docs_score_thresholds,txt_docs_score_thresholds,text_field,vector_field)
         
         ConversationalRetrievalChain._call = new_conversational_call
-        printTime("get_answer_from_conversational before from llm")
+        
         chain = ConversationalRetrievalChain.from_llm(
                     llm = self.llm,
                     condense_question_llm=self.condense_question_llm or self.llm,
@@ -309,40 +304,20 @@ class SmartSearchQA:
                     return_generated_question = True,
                     response_if_no_docs_found = response_if_no_docs_found
                 )
-        printTime("get_answer_from_conversational before chain()")
         
 #         result = chain({"question": query, "chat_history": history})
         result = chain({
             "question": query, 
-            "chat_history": history,
-            "search_engine": self.search_engine
+            "chat_history": history
         })
 
         
         answer=result['answer']
         
-        # print('answer:',answer)
-        # print('response_if_no_docs_found:',response_if_no_docs_found)
-        # if answer == response_if_no_docs_found:
-        #     vec_docs_score_thresholds = 0
-        #     txt_docs_score_thresholds = 0
-        #     retriever = self.get_retriever(top_k,search_method,txt_docs_num,vec_docs_score_thresholds,txt_docs_score_thresholds,text_field,vector_field)
-        #     docs = retriever.get_relevant_documents(query)
-        #     print('docs:',docs)
-        #     if len(docs) > 0:
-        #         answer = '找不到这个问题的答案，您可以问以下问题：'
-        #         title_set = set()
-        #         for doc in docs:
-        #             title = doc[0].metadata['sentence']
-        #             if title.find('标题') >=0 and title.find('内容') >=0:
-        #                 title = title.split(':')[1][:-3]
-        #             elif title.find('标题') >=0:
-        #                 title = title.split(':')[1]
-        #             title_set.add(title.strip())
-        #         for title in iter(title_set):
-        #             answer += ('\n' + title)
-        #     print('new answer:',answer)
-        #     result['answer'] = answer
+        # answer=answer.split('\n\nhuman')[0].split('\n\n用户')[0].split('\n\nquestion')[0].split('\n\n\ufeffquestion')[0].split('\n\nQuestion')[0].strip()
+        
+        # if language == "english":
+        #     answer = answer.split('Answer:')[-1]
 
         if len(session_id) > 0:
             new_query=result['generated_question']
@@ -449,97 +424,3 @@ class SmartSearchQA:
             update_session_info(table_name, session_id, query, string_processor(answer), "chat")
         
         return answer
-
-    def get_answer_from_multimodel(self,query,
-                                        question: list=[],
-                                        task: str='qa',
-                                        isCheckedKnowledgeBase: bool=True,
-                                        system_prompt: str='',
-                                        session_id: str='',
-                                        table_name: str='',
-                                        top_k: int = 3,
-                                        search_method: str="vector",
-                                        txt_docs_num: int=0,
-                                        response_if_no_docs_found: str="can't find the answer",
-                                        vec_docs_score_thresholds: float =0,
-                                        txt_docs_score_thresholds: float =0,
-                                        context_rounds: int = 3,
-                                        text_field: str="text",
-                                        vector_field: str="vector_field",
-                                        image_field: str="image_base64",
-                                        ):
-
-        self.llm.model_kwargs['language'] = self.language
-        if len(system_prompt) > 0:
-            self.llm.model_kwargs['system'] = system_prompt
-        
-        input_docs = []
-        for item in question:
-            input_doc = {}
-            #item = json.loads(item)
-            input_type = ''
-            if 'type' in item.keys():
-                input_type = item['type']
-            if input_type == 'text':
-                input_doc['text'] = item['text']
-            elif input_type == 'image':
-                input_doc['image'] =  item['base64']
-            if len(input_doc) > 0:
-                input_docs.append(input_doc)
-        print('input_docs:',input_docs)
-        if len(input_docs) > 0:
-            self.llm.model_kwargs['input_docs'] = input_docs
-        
-        history_str = ''
-        session_info = ""
-        if len(session_id) > 0 and len(table_name) > 0 and context_rounds > 0:
-            session_info = get_session_info(table_name,session_id)
-            if len(session_info) > 0:
-                session_info = session_info[-context_rounds:]
-                for item in session_info:
-                    print("session info:",item[0]," ; ",item[1]," ; ",item[2])
-                    if item[2] == "qa":
-                        if self.language.find('chinese') >=0:
-                            history_str += ( '问题：' + str(item[0]) + '，回复：' + str(item[1]) + ';' )
-                        elif self.language == 'english':
-                            history_str += ( 'question:' + str(item[0]) + ',answer:' + str(item[1]) + ';' )
-        print('history:',history_str)
-        if len(history_str) > 0:
-            self.llm.model_kwargs['history'] = history_str
-        
-        result = {}
-        if (task == 'qa' or task == 'search') and isCheckedKnowledgeBase:
-            work_mode = "multi-modal"
-            retriever = self.get_retriever(top_k,search_method,txt_docs_num,vec_docs_score_thresholds,txt_docs_score_thresholds,text_field,vector_field,image_field,work_mode)
-            docs = retriever.get_relevant_documents(query)
-            
-            print('docs:',docs)
-
-            result['source_documents'] = [[doc[0],doc[1]] for doc in docs]
-            if len(docs) > 0:
-                related_docs = []
-                for doc in docs:
-                    related_doc = {}
-                    related_doc['text'] = doc[0].page_content
-                    if 'sources' in  doc[0].metadata.keys():
-                        related_doc['title'] = doc[0].metadata['sources'].split('/')[-1]
-                    elif 'source' in  doc[0].metadata.keys():
-                        related_doc['title'] = doc[0].metadata['source'].split('/')[-1]
-                    if len(doc) == 3:
-                        related_doc['image'] = doc[2]
-                    if len(related_doc) > 0:
-                        related_docs.append(related_doc)
-                    
-                if len(related_docs) > 0:
-                    self.llm.model_kwargs['related_docs'] = related_docs
-    
-                response = self.llm(prompt='')
-                result['answer'] = response
-            else:
-                result['answer'] = response_if_no_docs_found
-                
-        elif task == 'chat' or not isCheckedKnowledgeBase:
-            result = self.llm(prompt='')
-            
-        print('result:',result)
-        return result

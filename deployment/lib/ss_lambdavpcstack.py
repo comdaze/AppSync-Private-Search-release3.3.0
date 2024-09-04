@@ -9,23 +9,18 @@ from aws_cdk import (
     CfnParameter,
     Aws,
     Duration,
-    aws_ec2,
     aws_lambda as _lambda,
     aws_apigateway as apigw,
     aws_dynamodb as dynamodb,
     aws_s3 as s3,
     aws_s3_notifications as s3n,
     aws_iam as _iam,
-    aws_sqs as sqs,
-    aws_glue as glue,
-    aws_s3_deployment as s3deploy,
+    aws_ec2,
     ContextProvider,
     RemovalPolicy
 )
 from aws_cdk.aws_apigatewayv2_integrations_alpha import WebSocketLambdaIntegration
 from aws_cdk import aws_apigatewayv2_alpha as apigwv2
-from aws_cdk.aws_lambda_event_sources import DynamoEventSource
-from aws_cdk.aws_lambda_event_sources import SqsEventSource
 import os
 
 binary_media_types = ["multipart/form-data"]
@@ -68,6 +63,85 @@ class LambdaVPCStack(Stack):
         )
 
         print("These functions are slected( configuration is in cdk.json context 'selection'):  ", func_selection)
+        # role and policy (smartsearch knn doc,opensearch-search-knn,knn_faq),all three function using same policy.
+        if ('knn' in func_selection or 'knn_faq' in func_selection or 'knn_doc' in func_selection):
+            knn_policy_statement = _iam.PolicyStatement(
+                actions=[
+                    'sagemaker:InvokeEndpointAsync',
+                    'sagemaker:InvokeEndpoint',
+                    'es:ESHttpPost',
+                    'ec2:CreateNetworkInterface',
+                    'ec2:DescribeNetworkInterfaces',
+                    'ec2:DeleteNetworkInterface',
+                    'secretsmanager:GetSecretValue',
+                ],
+                resources=['*']  # 可根据需求进行更改
+            )
+            knn_lambda_role = _iam.Role(
+                self, 'knn_lambda_role_Role',
+                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
+            )
+            knn_lambda_role.add_to_policy(knn_policy_statement)
+
+        # role and policy (insert feedback)
+        if ('feedback' in func_selection):
+            fb_policy_statement = _iam.PolicyStatement(
+                actions=[
+                    'dynamodb:*',
+                ],
+                resources=['*']  # 可根据需求进行更改
+            )
+            fb_lambda_role = _iam.Role(
+                self, 'fb_lambda_role_Role',
+                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
+            )
+            fb_lambda_role.add_to_policy(fb_policy_statement)
+            # create dynamo table
+            table_name = self.node.try_get_context("table_name")
+            feedback_table = dynamodb.Table(
+                self, table_name,
+                partition_key=dynamodb.Attribute(
+                    name="SearchInputs",
+                    type=dynamodb.AttributeType.STRING
+                ),
+                sort_key=dynamodb.Attribute(
+                    name="_id",
+                    type=dynamodb.AttributeType.STRING
+                ),
+                removal_policy=RemovalPolicy.DESTROY
+            )
+        # role and policy (opensearch-lambda-post_selection)
+        if ('post_selection' in func_selection):
+            ps_policy_statement = _iam.PolicyStatement(
+                actions=[
+                    'lambda:InvokeFunctionUrl',
+                    'lambda:InvokeFunction',
+                    'lambda:InvokeAsync',
+                    'ec2:CreateNetworkInterface',
+                    'ec2:DescribeNetworkInterfaces',
+                    'ec2:DeleteNetworkInterface'
+                ],
+                resources=['*']  # 可根据需求进行更改
+            )
+            ps_lambda_role = _iam.Role(
+                self, 'ps_lambda_role_Role',
+                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
+            )
+            ps_lambda_role.add_to_policy(ps_policy_statement)
+
+        # role and policy (open-search_xgb_train_deploy)
+        if ('xgb_train' in func_selection):
+            xgb_policy_statement = _iam.PolicyStatement(
+                actions=[
+                    'ecr:*',
+                ],
+                resources=['*']  # 可根据需求进行更改
+            )
+            xgb_lambda_role = _iam.Role(
+                self, 'xgb_lambda_role_Role',
+                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
+            )
+            xgb_lambda_role.add_to_policy(xgb_policy_statement)
 
         if 'langchain_processor_qa' in func_selection:
             langchain_qa_func = self.create_langchain_qa_func(search_engine_key=search_engine_key, vpc=vpc,
@@ -77,14 +151,43 @@ class LambdaVPCStack(Stack):
                                                                       vpc_subnets=vpc_subnets_selection)
 
         # api gateway resource
-        api = apigw.RestApi(self, 'smartsearch-api',
-                            default_cors_preflight_options=apigw.CorsOptions(
-                                allow_origins=apigw.Cors.ALL_ORIGINS,
-                                allow_methods=apigw.Cors.ALL_METHODS
-                            ),
-                            endpoint_types=[apigw.EndpointType.REGIONAL]
-                            )
-
+        if self.node.try_get_context("private_rest_api"):
+            api = apigw.RestApi(self, 'smartsearch-api',
+                                default_cors_preflight_options=apigw.CorsOptions(
+                                    allow_origins=apigw.Cors.ALL_ORIGINS,
+                                    allow_methods=apigw.Cors.ALL_METHODS
+                                ),
+                                endpoint_types=[apigw.EndpointType.PRIVATE],
+                                policy=_iam.PolicyDocument(
+                                    statements=[
+                                        _iam.PolicyStatement(
+                                            effect=_iam.Effect.ALLOW,
+                                            principals=[_iam.AnyPrincipal()],
+                                            actions=["execute-api:Invoke"],
+                                            resources=["execute-api:/*"],
+                                        ),
+                                        _iam.PolicyStatement(
+                                            effect=_iam.Effect.DENY,
+                                            principals=[_iam.AnyPrincipal()],
+                                            actions=["execute-api:Invoke"],
+                                            resources=["execute-api:/*"],
+                                            conditions={
+                                                "StringNotEquals": {
+                                                    "aws:SourceVpc": vpc.vpc_id
+                                                }
+                                            }
+                                        )
+                                    ]
+                                )
+                                )
+        else:
+            api = apigw.RestApi(self, 'smartsearch-api',
+                                default_cors_preflight_options=apigw.CorsOptions(
+                                    allow_origins=apigw.Cors.ALL_ORIGINS,
+                                    allow_methods=apigw.Cors.ALL_METHODS
+                                ),
+                                endpoint_types=[apigw.EndpointType.REGIONAL]
+                                )
         #
         user_model = api.add_model("UserModel",
                                    schema=apigw.JsonSchema(
@@ -106,131 +209,332 @@ class LambdaVPCStack(Stack):
                                        required=["ind", "knn", "q"]
                                    )
                                    )
-
+        #
+        #     search_knn_resource.add_method(
+        #         'GET',
+        #         search_knn_integration,
+        #         request_models={
+        #             "application/json": user_model
+        #         },
+        #         method_responses=[
+        #             apigw.MethodResponse(
+        #                 status_code="200",
+        #                 response_parameters={
+        #                     'method.response.header.Access-Control-Allow-Origin': True
+        #                 }
+        #             )
+        #         ]
+        #     )
         websocket_table = dynamodb.Table(self, "websocket",
                                          partition_key=dynamodb.Attribute(name="id",
                                                                           type=dynamodb.AttributeType.STRING),
                                          removal_policy=RemovalPolicy.DESTROY
                                          )
-
-        _websocket_policy = _iam.PolicyStatement(
-            actions=[
-                'lambda:*',
-                'apigateway:*',
-                'dynamodb:*',
-                'logs:*',
-                'ec2:CreateNetworkInterface',
-                'ec2:DescribeNetworkInterfaces',
-                'ec2:DeleteNetworkInterface',
-            ],
-            resources=['*']  
-        )
-        websocket_role = _iam.Role(
-            self, 'websocket_role',
-            assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
-        )
-        websocket_role.add_to_policy(_websocket_policy)
-
-        websocket_role.add_managed_policy(
-            _iam.ManagedPolicy.from_aws_managed_policy_name("AmazonDynamoDBFullAccess")
-        )
-
         table_name = websocket_table.table_name
 
-        connect_function_name = 'websocket_connect'
-        websocketconnect = _lambda.Function(
-            self, connect_function_name,
-            function_name=connect_function_name,
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            role=websocket_role,
-            code=_lambda.Code.from_asset('../lambda/' + connect_function_name),
-            handler='lambda_function' + '.lambda_handler',
-            vpc=vpc,
-            vpc_subnets=vpc_subnets_selection,
-        )
-        websocketconnect.add_environment("TABLE_NAME", table_name)
+        if self.node.try_get_context("private_appsync"):
+            private_search_lambda_policy = _iam.PolicyStatement(
+                actions=[
+                    'lambda:*',
+                    'apigateway:*',
+                    'dynamodb:*',
+                    'logs:*',
+                    'ec2:CreateNetworkInterface',
+                    'ec2:DescribeNetworkInterfaces',
+                    'ec2:DeleteNetworkInterface',
+                ],
+                resources=['*']  
+            )
+            private_search_lambda_role = _iam.Role(
+                self, 'private_search_lambda_role',
+                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
+            )
+            private_search_lambda_role.add_to_policy(private_search_lambda_policy)
+            private_search_lambda_role.add_managed_policy(
+                _iam.ManagedPolicy.from_aws_managed_policy_name("AmazonDynamoDBFullAccess")
+            )
+            private_search_lambda = self.define_lambda_function('private_search',
+                    private_search_lambda_role, vpc=vpc,
+                    vpc_subnets=vpc_subnets_selection,
+                    timeout=60)
+            private_search_lambda.add_environment("TABLE_NAME", table_name)
+            private_search_resource = api.root.add_resource(
+                'private_search',
+                default_cors_preflight_options=apigw.CorsOptions(
+                    allow_methods=['POST', 'OPTIONS'],
+                    allow_origins=apigw.Cors.ALL_ORIGINS)
+            )
+            private_search_integration = apigw.LambdaIntegration(
+                private_search_lambda,
+                proxy=True,
+                integration_responses=[
+                    apigw.IntegrationResponse(
+                        status_code="200",
+                        response_parameters={
+                            'method.response.header.Access-Control-Allow-Origin': "'*'"
+                        }
+                    )
+                ]
+            )
+            private_search_resource.add_method(
+                'POST',
+                private_search_integration,
+                method_responses=[
+                    apigw.MethodResponse(
+                        status_code="200",
+                        response_parameters={
+                            'method.response.header.Access-Control-Allow-Origin': True
+                        }
+                    )
+                ]
+            )
 
-        disconnect_function_name = 'websocket_disconnect'
-        websocketdisconnect = _lambda.Function(
-            self, disconnect_function_name,
-            function_name=disconnect_function_name,
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            role=websocket_role,
-            code=_lambda.Code.from_asset('../lambda/' + disconnect_function_name),
-            handler='lambda_function' + '.lambda_handler',
-            vpc=vpc,
-            vpc_subnets=vpc_subnets_selection,
-        )
-        websocketdisconnect.add_environment("TABLE_NAME", table_name)
+            appsync_api = cdk.aws_appsync.GraphqlApi(self, 'AppSyncAPI', 
+                name=self.node.try_get_context("appsync_api_name"),
+                definition=cdk.aws_appsync.Definition.from_file("appsync.graphql"),
+                visibility=cdk.aws_appsync.Visibility.PRIVATE
+                )
+            none_data_source = appsync_api.add_none_data_source('AppSyncNoneDataSource')
+            none_data_source.create_resolver(
+                'AppSyncNoneResolver',
+                type_name='Mutation',
+                field_name='publish',
+                request_mapping_template=cdk.aws_appsync.MappingTemplate.from_string('''
+                    {
+                        "version": "2017-02-28",
+                        "payload": {
+                            "name": "$context.arguments.name",
+                            "data": $util.toJson($context.arguments.data)
+                        }
+                    }
+                '''), 
+                response_mapping_template=cdk.aws_appsync.MappingTemplate.from_string('$util.toJson($context.result)')
+            )
+            self.APPSYNC_ENDPOINT = appsync_api.graphql_url
+            self.APPSYNC_API_KEY = appsync_api.api_key
+            langchain_qa_func.add_environment("APPSYNC_ENDPOINT", self.APPSYNC_ENDPOINT)
+            langchain_qa_func.add_environment("APPSYNC_API_KEY", self.APPSYNC_API_KEY)
+            cdk.CfnOutput(self, 'private_appsync_api', value=self.APPSYNC_ENDPOINT, export_name='PrivateAppSyncAPI')
+        else:
+            _websocket_policy = _iam.PolicyStatement(
+                actions=[
+                    'lambda:*',
+                    'apigateway:*',
+                    'dynamodb:*',
+                    'logs:*',
+                    'ec2:CreateNetworkInterface',
+                    'ec2:DescribeNetworkInterfaces',
+                    'ec2:DeleteNetworkInterface',
+                ],
+                resources=['*']  
+            )
+            websocket_role = _iam.Role(
+                self, 'websocket_role',
+                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
+            )
+            websocket_role.add_to_policy(_websocket_policy)
 
-        default_function_name = 'websocket_default'
-        websocketdefault = _lambda.Function(
-            self, default_function_name,
-            function_name=default_function_name,
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            role=websocket_role,
-            code=_lambda.Code.from_asset('../lambda/' + disconnect_function_name),
-            handler='lambda_function' + '.lambda_handler',
-            vpc=vpc,
-            vpc_subnets=vpc_subnets_selection,
-        )
-        websocketdefault.add_environment("TABLE_NAME", table_name)
+            websocket_role.add_managed_policy(
+                _iam.ManagedPolicy.from_aws_managed_policy_name("AmazonDynamoDBFullAccess")
+            )
+            connect_function_name = 'websocket_connect'
+            websocketconnect = _lambda.Function(
+                self, connect_function_name,
+                function_name=connect_function_name,
+                runtime=_lambda.Runtime.PYTHON_3_9,
+                role=websocket_role,
+                code=_lambda.Code.from_asset('../lambda/' + connect_function_name),
+                handler='lambda_function' + '.lambda_handler',
+                vpc=vpc,
+                vpc_subnets=vpc_subnets_selection,
+            )
+            websocketconnect.add_environment("TABLE_NAME", table_name)
 
-        search_function_name = 'websocket_search'
-        websocketsearch = _lambda.Function(
-            self, search_function_name,
-            function_name=search_function_name,
-            runtime=_lambda.Runtime.PYTHON_3_9,
-            role=websocket_role,
-            code=_lambda.Code.from_asset('../lambda/' + search_function_name),
-            handler='lambda_function' + '.lambda_handler',
-            vpc=vpc,
-            vpc_subnets=vpc_subnets_selection,
-        )
-        websocketsearch.add_environment("TABLE_NAME", table_name)
-        websocketsearch.add_environment("DIR_NAME", "search")
+            disconnect_function_name = 'websocket_disconnect'
+            websocketdisconnect = _lambda.Function(
+                self, disconnect_function_name,
+                function_name=disconnect_function_name,
+                runtime=_lambda.Runtime.PYTHON_3_9,
+                role=websocket_role,
+                code=_lambda.Code.from_asset('../lambda/' + disconnect_function_name),
+                handler='lambda_function' + '.lambda_handler',
+                vpc=vpc,
+                vpc_subnets=vpc_subnets_selection,
+            )
+            websocketdisconnect.add_environment("TABLE_NAME", table_name)
 
-        #publish a new version
-        version = _lambda.Version(
-            self, "websocketsearchVersion",
-            lambda_=websocketsearch,
-            description="v1"
-        )
+            default_function_name = 'websocket_default'
+            websocketdefault = _lambda.Function(
+                self, default_function_name,
+                function_name=default_function_name,
+                runtime=_lambda.Runtime.PYTHON_3_9,
+                role=websocket_role,
+                code=_lambda.Code.from_asset('../lambda/' + disconnect_function_name),
+                handler='lambda_function' + '.lambda_handler',
+                vpc=vpc,
+                vpc_subnets=vpc_subnets_selection,
+            )
+            websocketdefault.add_environment("TABLE_NAME", table_name)
 
-        # create an alias and provision concurrency=1
-        websocketsearchAlias = _lambda.Alias(
-            self, "websocketsearchAlias",
-            alias_name="prod",
-            version=version,
-            provisioned_concurrent_executions=1
-        )
+            search_function_name = 'websocket_search'
+            websocketsearch = _lambda.Function(
+                self, search_function_name,
+                function_name=search_function_name,
+                runtime=_lambda.Runtime.PYTHON_3_9,
+                role=websocket_role,
+                code=_lambda.Code.from_asset('../lambda/' + search_function_name),
+                handler='lambda_function' + '.lambda_handler',
+                vpc=vpc,
+                vpc_subnets=vpc_subnets_selection,
+            )
+            websocketsearch.add_environment("TABLE_NAME", table_name)
+            websocketsearch.add_environment("DIR_NAME", "search")
 
-        web_socket_api = apigwv2.WebSocketApi(self, "websocketapi")
-        apigwv2.WebSocketStage(self, "prod",
-                               web_socket_api=web_socket_api,
-                               stage_name="prod",
-                               auto_deploy=True
-                               )
-        web_socket_api.add_route("search",
-                                 integration=WebSocketLambdaIntegration("SearchIntegration", websocketsearchAlias)
-                                 )
-        web_socket_api.add_route("$connect",
-                                 integration=WebSocketLambdaIntegration("SearchIntegration", websocketconnect)
-                                 )
-        web_socket_api.add_route("$disconnect",
-                                 integration=WebSocketLambdaIntegration("SearchIntegration", websocketdisconnect)
-                                 )
-        web_socket_api.add_route("$default",
-                                 integration=WebSocketLambdaIntegration("SearchIntegration", websocketdefault)
-                                 )
+            web_socket_api = apigwv2.WebSocketApi(self, "websocketapi")
+            apigwv2.WebSocketStage(self, "prod",
+                                web_socket_api=web_socket_api,
+                                stage_name="prod",
+                                auto_deploy=True
+                                )
+            web_socket_api.add_route("search",
+                                    integration=WebSocketLambdaIntegration("SearchIntegration", websocketsearch)
+                                    )
+            web_socket_api.add_route("$connect",
+                                    integration=WebSocketLambdaIntegration("SearchIntegration", websocketconnect)
+                                    )
+            web_socket_api.add_route("$disconnect",
+                                    integration=WebSocketLambdaIntegration("SearchIntegration", websocketdisconnect)
+                                    )
+            web_socket_api.add_route("$default",
+                                    integration=WebSocketLambdaIntegration("SearchIntegration", websocketdefault)
+                                    )
 
-        # langchain_qa_func加wss gw 环境变量
-        langchain_qa_func.add_environment("api_gw", web_socket_api.api_id)
-        # cfn output
-        CN_SUFFIX = ".cn" if "cn-" in os.getenv('AWS_REGION') else ""
-        web_socket_url = f"wss://{web_socket_api.api_id}.execute-api.{os.getenv('AWS_REGION')}.amazonaws.com{CN_SUFFIX}/prod"
-        cdk.CfnOutput(self, 'web_socket_api', value=web_socket_url, export_name='WebSocketApi')
+            # langchain_qa_func加wss gw 环境变量
+            langchain_qa_func.add_environment("api_gw", web_socket_api.api_id)
+            # cfn output
+            CN_SUFFIX = ".cn" if "cn-" in os.getenv('AWS_REGION') else ""
+            web_socket_url = f"wss://{web_socket_api.api_id}.execute-api.{os.getenv('AWS_REGION')}.amazonaws.com{CN_SUFFIX}/prod"
+            cdk.CfnOutput(self, 'web_socket_api', value=web_socket_url, export_name='WebSocketApi')
 
+
+        if ('knn_faq' in func_selection):
+            self.opensearch_search_knn_faq_lambda = self.define_lambda_function('opensearch-search-knn-faq',
+                                                                                knn_lambda_role)
+            self.opensearch_search_knn_faq_lambda.add_environment("host", host)
+            # search_knn_faq_resource
+            search_faq_resource = api.root.add_resource(
+                'search_faq',
+                default_cors_preflight_options=apigw.CorsOptions(
+                    allow_methods=['GET', 'OPTIONS'],
+                    allow_origins=apigw.Cors.ALL_ORIGINS)
+            )
+
+            search_faq_integration = apigw.LambdaIntegration(
+                self.opensearch_search_knn_faq_lambda,
+                proxy=True,
+                integration_responses=[
+                    apigw.IntegrationResponse(
+                        status_code="200",
+                        response_parameters={
+                            'method.response.header.Access-Control-Allow-Origin': "'*'"
+                        }
+                    )
+                ]
+            )
+
+            user_model = api.add_model("UserModel",
+                                       schema=apigw.JsonSchema(
+                                           type=apigw.JsonSchemaType.OBJECT,
+                                           properties={
+                                               "ind": apigw.JsonSchema(
+                                                   type=apigw.JsonSchemaType.STRING
+                                               ),
+                                               "knn": apigw.JsonSchema(
+                                                   type=apigw.JsonSchemaType.STRING
+                                               ),
+                                               "ml": apigw.JsonSchema(
+                                                   type=apigw.JsonSchemaType.STRING
+                                               ),
+                                               "q": apigw.JsonSchema(
+                                                   type=apigw.JsonSchemaType.STRING
+                                               )
+                                           },
+                                           required=["ind", "knn", "q"]
+                                       )
+                                       )
+
+            search_faq_resource.add_method(
+                'GET',
+                search_faq_integration,
+                request_models={
+                    "application/json": user_model
+                },
+                method_responses=[
+                    apigw.MethodResponse(
+                        status_code="200",
+                        response_parameters={
+                            'method.response.header.Access-Control-Allow-Origin': True
+                        }
+                    )
+                ]
+            )
+
+        if ('feedback' in func_selection):
+            self.opensearch_lambda_insert_feedback_lambda = self.define_lambda_function(
+                'opensearch-lambda-insert_feedback', fb_lambda_role)
+        if ('post_selection' in func_selection):
+            self.opensearch_lambda_post_selection_lambda = self.define_lambda_function(
+                'opensearch-lambda-post_selection', ps_lambda_role)
+        # if('bot' in func_selection):
+        #     self.opensearch_lambda_post_selection_lambda = self.define_lambda_function('ai_bot_qa',ps_lambda_role,timeout= 60)
+        if ('xgb_train' in func_selection):
+            self.open_search_xgb_train_deploy_lambda = self.define_lambda_function('open-search_xgb_train_deploy',
+                                                                                   xgb_lambda_role)
+        if ('knn_doc' in func_selection):
+            self.opensearch_search_knn_doc_lambda = self.define_lambda_function('opensearch-search-knn-doc',
+                                                                                knn_lambda_role, vpc=vpc,
+                                                                                vpc_subnets=vpc_subnets_selection,
+                                                                                timeout=60)
+            self.opensearch_search_knn_doc_lambda.add_environment("host", host)
+            #################################################
+            self.opensearch_search_knn_doc_lambda.add_environment("domain_name", web_socket_api.api_id)
+            self.opensearch_search_knn_doc_lambda.add_environment("region", os.getenv('AWS_REGION', 'us-west-2'))
+            self.opensearch_search_knn_doc_lambda.add_environment("APPSYNC_ENDPOINT", self.APPSYNC_ENDPOINT)
+            self.opensearch_search_knn_doc_lambda.add_environment("APPSYNC_API_KEY", self.APPSYNC_API_KEY)
+
+            # search_knn_doc_resource
+            search_knn_doc_resource = api.root.add_resource(
+                'search_knn_doc',
+                default_cors_preflight_options=apigw.CorsOptions(
+                    allow_methods=['GET', 'OPTIONS'],
+                    allow_origins=apigw.Cors.ALL_ORIGINS)
+            )
+
+            search_knn_doc_integration = apigw.LambdaIntegration(
+                self.opensearch_search_knn_doc_lambda,
+                proxy=True,
+                integration_responses=[
+                    apigw.IntegrationResponse(
+                        status_code="200",
+                        response_parameters={
+                            'method.response.header.Access-Control-Allow-Origin': "'*'"
+                        }
+                    )
+                ]
+            )
+
+            search_knn_doc_resource.add_method(
+                'GET',
+                search_knn_doc_integration,
+                method_responses=[
+                    apigw.MethodResponse(
+                        status_code="200",
+                        response_parameters={
+                            'method.response.header.Access-Control-Allow-Origin': True
+                        }
+                    )
+                ]
+            )
 
         if 'langchain_processor_qa' in func_selection and langchain_qa_func is not None:
             self.create_apigw_resource_method_for_langchain_qa(
@@ -244,10 +548,10 @@ class LambdaVPCStack(Stack):
             api=api,
             func=content_moderation_func
         )
-        self.create_knowledge_base_handler(api, search_engine_key, vpc, vpc_subnets_selection)
 
         self.apigw = api
 
+    
     def create_apigw_resource_method_for_content_moderation(self, api, func):
 
         content_moderation_resource = api.root.add_resource(
@@ -381,7 +685,7 @@ class LambdaVPCStack(Stack):
             timeout=Duration.minutes(10),
             vpc=vpc,
             vpc_subnets=vpc_subnets,
-            reserved_concurrent_executions=10
+            reserved_concurrent_executions=100
         )
         langchain_processor_qa_function.add_environment("host", search_engine_key)
         langchain_processor_qa_function.add_environment("index", index)
@@ -393,21 +697,6 @@ class LambdaVPCStack(Stack):
         langchain_processor_qa_function.add_environment("search_engine_zilliz", str(search_engine_zilliz))
         langchain_processor_qa_function.add_environment("zilliz_endpoint", str(zilliz_endpoint))
         langchain_processor_qa_function.add_environment("zilliz_token", str(zilliz_token))
-
-        #publish a new version
-        version = _lambda.Version(
-            self, "LangChainProcessorVersion",
-            lambda_=langchain_processor_qa_function,
-            description="v1"
-        )
-
-        # create an alias and provision concurrency=1
-        alias = _lambda.Alias(
-            self, "LangChainProcessorQAAlias",
-            alias_name="prod",
-            version=version,
-            provisioned_concurrent_executions=1
-        )
 
         return langchain_processor_qa_function
 
@@ -445,19 +734,6 @@ class LambdaVPCStack(Stack):
                 )
             ]
         )
-        
-        langchain_processor_qa_resource.add_method(
-            'POST',
-            langchain_processor_qa_integration,
-            method_responses=[
-                apigw.MethodResponse(
-                    status_code="200",
-                    response_parameters={
-                        'method.response.header.Access-Control-Allow-Origin': True
-                    }
-                )
-            ]
-        )
 
         chat_table = dynamodb.Table(self, "ChatSessionRecord",
                                     partition_key=dynamodb.Attribute(name="session-id",
@@ -484,17 +760,17 @@ class LambdaVPCStack(Stack):
         langchain_processor_qa_function.add_environment("dynamodb_table_name", chat_table.table_name)
         cdk.CfnOutput(self, 'chat_table_name', value=chat_table.table_name, export_name='ChatTableName')
 
-    def create_apigw_resource_method_for_endpoint_list(self, api, endpoint_list_function):
+    def create_apigw_resource_method_for_knowledge_base_handler(self, api, knowledge_base_handler_function):
 
-        endpoint_list_resource = api.root.add_resource(
-            'endpoint_list',
+        knowledge_base_handler_resource = api.root.add_resource(
+            'knowledge_base_handler',
             default_cors_preflight_options=apigw.CorsOptions(
                 allow_methods=['GET', 'OPTIONS'],
                 allow_origins=apigw.Cors.ALL_ORIGINS)
         )
 
-        endpoint_list_integration = apigw.LambdaIntegration(
-            endpoint_list_function,
+        knowledge_base_handler_integration = apigw.LambdaIntegration(
+            knowledge_base_handler_function,
             proxy=True,
             integration_responses=[
                 apigw.IntegrationResponse(
@@ -506,9 +782,9 @@ class LambdaVPCStack(Stack):
             ]
         )
 
-        endpoint_list_resource.add_method(
+        knowledge_base_handler_resource.add_method(
             'GET',
-            endpoint_list_integration,
+            knowledge_base_handler_integration,
             method_responses=[
                 apigw.MethodResponse(
                     status_code="200",
@@ -532,6 +808,7 @@ class LambdaVPCStack(Stack):
         search_engine_zilliz = self.node.try_get_context("search_engine_zilliz")
         zilliz_endpoint = self.node.try_get_context("zilliz_endpoint")
         zilliz_token = self.node.try_get_context("zilliz_token")
+
         CN_SUFFIX = "-cn" if "cn-" in REGION else ""
 
         """
@@ -549,19 +826,7 @@ class LambdaVPCStack(Stack):
                             versioned=False,
                             removal_policy=RemovalPolicy.DESTROY
                             )
-        
-        _bucket.add_cors_rule(
-            allowed_headers=["*"],
-            allowed_methods=[
-                             s3.HttpMethods.GET,
-                             s3.HttpMethods.PUT,
-                             s3.HttpMethods.POST
-                             ],
-            allowed_origins=["*"]
-            )
 
-        self.bucket = _bucket
-        
         """
         2. Create Execution Role for Uploading file to S3
         IAM RoleName: custom-role-document-ai-upload-to-s3
@@ -612,8 +877,10 @@ class LambdaVPCStack(Stack):
                 'sagemaker:InvokeEndpoint',
                 's3:AmazonS3FullAccess',
                 'lambda:AWSLambdaBasicExecutionRole',
-                'secretsmanager:SecretsManagerReadWrite',
-                'bedrock:*'
+                'ec2:CreateNetworkInterface',
+                'ec2:DescribeNetworkInterfaces',
+                'ec2:DeleteNetworkInterface',
+                'secretsmanager:SecretsManagerReadWrite'
             ],
             resources=['*']  # 可根据需求进行更改
         )
@@ -646,8 +913,8 @@ class LambdaVPCStack(Stack):
             timeout=Duration.minutes(10),
             vpc=vpc,
             vpc_subnets=vpc_subnets,
-            reserved_concurrent_executions=10
-            )
+            reserved_concurrent_executions=100
+        )
         data_load_function.add_environment("host", search_engine_key)
         data_load_function.add_environment("index", index)
         data_load_function.add_environment("language", language)
@@ -702,11 +969,11 @@ class LambdaVPCStack(Stack):
         }
 
         """
-        6. Create Lambda for list all sagemaker endpoint  for front-end
+        6. Create Lambda for list all indices from OpenSearch for front-end
         """
-        function_name = 'endpoint_list'
+        function_name = 'knowledge_base_handler'
 
-        _endpoint_list_role_policy = _iam.PolicyStatement(
+        _knowledge_base_role_policy = _iam.PolicyStatement(
             actions=[
                 's3:AmazonS3FullAccess',
                 'lambda:AWSLambdaBasicExecutionRole',
@@ -714,39 +981,44 @@ class LambdaVPCStack(Stack):
             ],
             resources=['*']  # 可根据需求进行更改
         )
-        endpoint_list_role = _iam.Role(
-            self, 'endpoint_list_role',
+        knowledge_base_handler_role = _iam.Role(
+            self, 'knowledge_base_handler_role',
             assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
         )
-        endpoint_list_role.add_to_policy(_data_load_role_policy)
+        knowledge_base_handler_role.add_to_policy(_data_load_role_policy)
 
-        endpoint_list_role.add_managed_policy(
+        knowledge_base_handler_role.add_managed_policy(
             _iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
         )
 
-        endpoint_list_role.add_managed_policy(
-            _iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSageMakerReadOnly")
+        knowledge_base_handler_role.add_managed_policy(
+            _iam.ManagedPolicy.from_aws_managed_policy_name("SecretsManagerReadWrite")
         )
 
+        knowledge_base_handler_role.add_managed_policy(
+            _iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3FullAccess")
+        )
 
-        endpoint_list_function = _lambda.Function(
+        knowledge_base_handler_function = _lambda.Function(
             self, function_name,
             function_name=function_name,
             runtime=_lambda.Runtime.PYTHON_3_9,
-            role=endpoint_list_role,
-            #layers=[self.langchain_processor_qa_layer],
+            role=knowledge_base_handler_role,
+            layers=[self.langchain_processor_qa_layer],
             code=_lambda.Code.from_asset('../lambda/' + function_name),
             handler='lambda_function' + '.lambda_handler',
             timeout=Duration.minutes(10),
             vpc=vpc,
             vpc_subnets=vpc_subnets,
-            reserved_concurrent_executions=10
-            )
-
-        self.create_apigw_resource_method_for_endpoint_list(
-            api=api,
-            endpoint_list_function=endpoint_list_function
+            reserved_concurrent_executions=20
         )
+        knowledge_base_handler_function.add_environment("host", search_engine_key)
+
+        self.create_apigw_resource_method_for_knowledge_base_handler(
+            api=api,
+            knowledge_base_handler_function=knowledge_base_handler_function
+        )
+
 
         # Create Integration Options
         """
@@ -814,7 +1086,10 @@ class LambdaVPCStack(Stack):
                 "logs:DescribeLogStreams",
                 "logs:PutLogEvents",
                 "logs:GetLogEvents",
-                "logs:FilterLogEvents"
+                "logs:FilterLogEvents",
+                'ec2:CreateNetworkInterface',
+                'ec2:DescribeNetworkInterfaces',
+                'ec2:DeleteNetworkInterface',
             ],
             resources=['*']
         )
@@ -840,318 +1115,11 @@ class LambdaVPCStack(Stack):
             code=_lambda.Code.from_asset('../lambda/' + function_name_content_moderation),
             handler='lambda_function' + '.lambda_handler',
             memory_size=256,
-            timeout=Duration.minutes(10),
             vpc=vpc,
             vpc_subnets=vpc_subnets,
+            timeout=Duration.minutes(10),
             reserved_concurrent_executions=10
-            )
+        )
         content_moderation_func.add_environment("content_moderation_api", content_moderation_api)
 
         return content_moderation_func
-    
-    def create_apigw_resource_method_for_endpoint_list(self, api, endpoint_list_function):
-
-        endpoint_list_resource = api.root.add_resource(
-            'endpoint_list',
-            default_cors_preflight_options=apigw.CorsOptions(
-                allow_methods=['GET', 'OPTIONS'],
-                allow_origins=apigw.Cors.ALL_ORIGINS)
-        )
-
-        endpoint_list_integration = apigw.LambdaIntegration(
-            endpoint_list_function,
-            proxy=True,
-            integration_responses=[
-                apigw.IntegrationResponse(
-                    status_code="200",
-                    response_parameters={
-                        'method.response.header.Access-Control-Allow-Origin': "'*'"
-                    }
-                )
-            ]
-        )
-
-        endpoint_list_resource.add_method(
-            'GET',
-            endpoint_list_integration,
-            method_responses=[
-                apigw.MethodResponse(
-                    status_code="200",
-                    response_parameters={
-                        'method.response.header.Access-Control-Allow-Origin': True
-                    }
-                )
-            ]
-        )
-
-    def create_apigw_resource_method_for_knowledge_base_handler(self, api, **kwargs):
-            knowledge_base_handler = api.root.add_resource('knowledge_base_handler')
-
-            jobs = knowledge_base_handler.add_resource(
-                        "jobs",
-                        default_cors_preflight_options=apigw.CorsOptions(
-                            allow_methods=['GET','POST'],
-                            allow_origins=apigw.Cors.ALL_ORIGINS)
-                    )
-            jobs_id = jobs.add_resource(
-                        "{id}",
-                        default_cors_preflight_options=apigw.CorsOptions(
-                            allow_methods=['PUT','DELETE','GET'],
-                            allow_origins=apigw.Cors.ALL_ORIGINS)
-                    )
-            presignurl = knowledge_base_handler.add_resource(
-                        "presignurl",
-                        default_cors_preflight_options=apigw.CorsOptions(
-                            allow_methods=['POST'],
-                            allow_origins=apigw.Cors.ALL_ORIGINS)
-                    )
-            indices = knowledge_base_handler.add_resource(
-                        "indices",
-                        default_cors_preflight_options=apigw.CorsOptions(
-                            allow_methods=['GET'],
-                            allow_origins=apigw.Cors.ALL_ORIGINS)
-                    )
-            
-            get_presignurl_function = kwargs.get('get_presignurl_function')
-            create_job_function = kwargs.get('create_job_function')
-
-            list_jobs_function = kwargs.get('list_jobs_function')
-            get_indice_list_function = kwargs.get('get_indice_list_function')
-
-            def create_api_integration(function,resource,method):
-
-                sub_resource_integration = apigw.LambdaIntegration(
-                    function,
-                    proxy=True,
-                    integration_responses=[
-                        apigw.IntegrationResponse(
-                            status_code="200",
-                            response_parameters={
-                                'method.response.header.Access-Control-Allow-Origin': "'*'"
-                            }
-                        )
-                    ]
-                )
-                resource.add_method(
-                    method,
-                    sub_resource_integration,
-                    method_responses=[
-                        apigw.MethodResponse(
-                            status_code="200",
-                            response_parameters={
-                                'method.response.header.Access-Control-Allow-Origin': True
-                            }
-                        )
-                    ]
-                )
-
-            #POST knowledge_base_handler/jobs
-            create_api_integration(create_job_function,jobs,"POST")  
-            #GET  knowledge_base_handler/jobs
-            create_api_integration(list_jobs_function,jobs,"GET")  
-
-            #POST knowledge_base_handler/presignurl
-            create_api_integration(get_presignurl_function,presignurl,"POST")
-            #GET knowledge_base_handler/indices
-            create_api_integration(get_indice_list_function,indices,"GET")
-
-    def create_knowledge_base_handler(self, api, search_engine_key, vpc, vpc_subnets_selection):
-
-            REGION = os.getenv('AWS_REGION', '')
-            EMBEDDING_ENDPOINT_NAME = "bedrock-titan-embed"
-            SEARCH_ENGINE = "opensearch"
-            PRIMARY_KEY = 'id'
-
-            _knowledge_base_role_policy = _iam.PolicyStatement(
-                actions=[
-                    'sagemaker:InvokeEndpointAsync',
-                    'sagemaker:InvokeEndpoint',
-                    's3:AmazonS3FullAccess',
-                    'lambda:AWSLambdaBasicExecutionRole',
-                    'secretsmanager:GetSecretValue',
-                    'bedrock:*',
-                    'dynamodb:AmazonDynamoDBFullAccess',
-                    'logs:*',
-                    'glue:*',
-                    'ec2:*'
-                ],
-                resources=['*']  # 可根据需求进行更改
-            )
-
-            knowledge_base_handler_role = _iam.Role(
-                self, 'knowledge_base_handler_rolev2',
-                assumed_by=_iam.ServicePrincipal('lambda.amazonaws.com')
-            )
-            knowledge_base_handler_role.add_to_policy(_knowledge_base_role_policy)
-
-            job_table = dynamodb.Table(
-                self, "job table",
-                partition_key=dynamodb.Attribute(
-                    name="id",
-                    type=dynamodb.AttributeType.STRING,
-                ),
-                removal_policy=RemovalPolicy.DESTROY,
-                stream=dynamodb.StreamViewType.NEW_IMAGE
-            )
-        
-            ACCOUNT = os.getenv('AWS_ACCOUNT_ID', '')
-            REGION = os.getenv('AWS_REGION', '')
-            bucket_for_configs = "intelligent-search-config-bucket" + "-" + ACCOUNT + "-" + REGION
-
-            _bucket_name = bucket_for_configs
-
-            _conifg_bucket = s3.Bucket(self,
-                                id=_bucket_name,
-                                bucket_name=_bucket_name,
-                                block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-                                encryption=s3.BucketEncryption.S3_MANAGED,
-                                enforce_ssl=True,
-                                versioned=False,
-                                removal_policy=RemovalPolicy.DESTROY
-                                )
-
-            deployment = s3deploy.BucketDeployment(self, "extraPythonFiles",
-                sources=[s3deploy.Source.asset("../lambda/knowledge_base_handler/job")],
-                destination_key_prefix="glue_job_assets",
-                destination_bucket=_conifg_bucket
-            )
-
-            GlueS3Prefix = f"s3://{bucket_for_configs}/glue_job_assets",
-
-            knowledge_base_handler_glue_role = _iam.Role(
-                self, 'knowledge_base_handler_rolev3',
-                assumed_by=_iam.ServicePrincipal('glue.amazonaws.com')
-            )
-            knowledge_base_handler_glue_role.add_to_policy(_knowledge_base_role_policy)
-            _conifg_bucket.grant_read_write(knowledge_base_handler_glue_role)
-            self.bucket.grant_read_write(knowledge_base_handler_glue_role)
-            job_table.grant_full_access(knowledge_base_handler_glue_role)
-
-            glue_job = glue.CfnJob(
-                self, "MyGlueJob",
-                name="my-glue-job",
-                role=knowledge_base_handler_glue_role.role_name,
-                execution_property = glue.CfnJob.ExecutionPropertyProperty(
-                    max_concurrent_runs=5
-                ),
-                command=glue.CfnJob.JobCommandProperty(
-                    name="pythonshell",
-                    python_version="3.9",
-                    script_location=f"s3://{bucket_for_configs}/glue_job_assets/glue-job-script.py",
-                ),
-                default_arguments={
-                    "--TempDir": f"s3://{bucket_for_configs}/temporary",
-                    "--extra-py-files": f"s3://{bucket_for_configs}/glue_job_assets/smart_search_dataload.py,s3://{bucket_for_configs}/glue_job_assets/bedrock.py,s3://{bucket_for_configs}/glue_job_assets/chinese_text_splitter.py,s3://{bucket_for_configs}/glue_job_assets/opensearch_vector_search.py",
-                    "--additional-python-modules": "tiktoken,tqdm==4.65.0,boto3==1.28.72,langchain==0.0.325,opensearch-py==2.3.2,docx2txt==0.8,pypdf==3.16.4,numexpr==2.8.4",
-                },
-                glue_version="3.0",
-                max_capacity=1.0, 
-                #connections=glue.CfnJob.ConnectionsListProperty(
-                #    connections=["MyCfnConnection"]
-                #),
-                )
-            
-            _conifg_bucket.grant_read_write(knowledge_base_handler_role)
-            self.bucket.grant_read_write(knowledge_base_handler_role)
-            job_table.grant_full_access(knowledge_base_handler_role)
-
-            function_name = 'createJob',
-            create_job_function = _lambda.Function(
-                self, 'createJob',
-                function_name='createJob',
-                runtime=_lambda.Runtime.PYTHON_3_9,
-                role=knowledge_base_handler_role,
-                layers=[self.langchain_processor_qa_layer],
-                code=_lambda.Code.from_asset(f"../lambda/knowledge_base_handler/job"),
-                handler='lambda_function' + '.lambda_handler',
-                timeout=Duration.minutes(5),
-                vpc=vpc,
-                vpc_subnets=vpc_subnets_selection,
-                environment={
-                    "EMBEDDING_ENDPOINT_NAME": EMBEDDING_ENDPOINT_NAME,
-                    "BUCKET": self.bucket.bucket_name,
-                    "HOST": search_engine_key,
-                    "REGION": REGION,
-                    "SEARCH_ENGINE": SEARCH_ENGINE,
-                    "TABLE_NAME": job_table.table_name,
-                    "PRIMARY_KEY": PRIMARY_KEY,
-            }
-            )
-
-            function_name = 'listJobs',
-            list_jobs_function = _lambda.Function(
-                self, 'listJobs',
-                function_name='listJobs',
-                runtime=_lambda.Runtime.PYTHON_3_9,
-                role=knowledge_base_handler_role,
-                layers=[self.langchain_processor_qa_layer],
-                code=_lambda.Code.from_asset(f"../lambda/knowledge_base_handler/crud"),
-                handler='get-all' + '.handler',
-                timeout=Duration.minutes(5),
-                vpc=vpc,
-                vpc_subnets=vpc_subnets_selection,
-                environment={
-                    "EMBEDDING_ENDPOINT_NAME": EMBEDDING_ENDPOINT_NAME,
-                    "BUCKET": self.bucket.bucket_name,
-                    "HOST": search_engine_key,
-                    "REGION": REGION,
-                    "SEARCH_ENGINE": SEARCH_ENGINE,
-                    "TABLE_NAME": job_table.table_name,
-                    "PRIMARY_KEY": PRIMARY_KEY
-            }
-            )
-
-            function_name = 'getPresignURL',
-            get_presignurl_function = _lambda.Function(
-                self, 'getPresignURL',
-                function_name='getPresignURL',
-                runtime=_lambda.Runtime.PYTHON_3_9,
-                role=knowledge_base_handler_role,
-                layers=[self.langchain_processor_qa_layer],
-                code=_lambda.Code.from_asset(f"../lambda/knowledge_base_handler/s3action"),
-                handler='get-presign-url' + '.handler',
-                timeout=Duration.minutes(5),
-                vpc=vpc,
-                vpc_subnets=vpc_subnets_selection,
-                environment={
-                    "EMBEDDING_ENDPOINT_NAME": EMBEDDING_ENDPOINT_NAME,
-                    "BUCKET": self.bucket.bucket_name,
-                    "HOST": search_engine_key,
-                    "REGION": REGION,
-                    "SEARCH_ENGINE": SEARCH_ENGINE,
-                    "TABLE_NAME": job_table.table_name,
-                    "PRIMARY_KEY": PRIMARY_KEY
-            }
-            )
-
-            function_name = 'getIndexList',
-            get_indice_list_function = _lambda.Function(
-                self, 'getIndiceList',
-                function_name='getIndiceList',
-                runtime=_lambda.Runtime.PYTHON_3_9,
-                role=knowledge_base_handler_role,
-                layers=[self.langchain_processor_qa_layer],
-                code=_lambda.Code.from_asset('../lambda/knowledge_base_handler/indices'),
-                handler='lambda_function' + '.lambda_handler',
-                timeout=Duration.minutes(5),
-                reserved_concurrent_executions=20,
-                vpc=vpc,
-                vpc_subnets=vpc_subnets_selection,
-                environment={
-                    "EMBEDDING_ENDPOINT_NAME": EMBEDDING_ENDPOINT_NAME,
-                    "BUCKET": self.bucket.bucket_name,
-                    "HOST": search_engine_key,
-                    "REGION": REGION,
-                    "SEARCH_ENGINE": SEARCH_ENGINE,
-                    "TABLE_NAME": job_table.table_name,
-                    "PRIMARY_KEY": PRIMARY_KEY
-            }
-            )
-
-            self.create_apigw_resource_method_for_knowledge_base_handler(
-                api=api,
-                create_job_function=create_job_function,
-                get_presignurl_function=get_presignurl_function,
-                list_jobs_function=list_jobs_function,
-                get_indice_list_function=get_indice_list_function,
-            )

@@ -24,10 +24,7 @@ export default function NavSide() {
   return (
     <SideNavigation
       // header={{ text: 'Sessions', href: '' }}
-      header={{
-        text: `Smart Search ${process.env.REACT_APP_UI_VERSION}`,
-        href: '',
-      }}
+      header={{ text: 'Smart Search', href: '' }}
       activeHref={activeHref}
       onFollow={(event) => {
         if (!event.detail.external) {
@@ -39,7 +36,6 @@ export default function NavSide() {
         {
           type: 'section',
           text: 'Sessions',
-          // items: lsSessionList.filter((item) => !!item.href),
           items: lsSessionList,
         },
         {
