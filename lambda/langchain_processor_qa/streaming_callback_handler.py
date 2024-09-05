@@ -6,12 +6,8 @@ import boto3
 import json
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain.schema import Generation, LLMResult
-import requests
-import os
 
-APPSYNC_ENDPOINT = os.environ.get('APPSYNC_ENDPOINT')
-APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
-
+from model import *
 class MyStreamingHandler(StreamingStdOutCallbackHandler ):
     def __init__(self, connectionId: str, domainName: str, region: str,stage:str):
 
@@ -23,10 +19,27 @@ class MyStreamingHandler(StreamingStdOutCallbackHandler ):
                                              endpoint_url=endpoint_url)
         self.answer=''
         self.connectionId=connectionId
+        self.last_post_time = 0  # 初始化上次发送时间为0
+        printTime("init stream handler")
 
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+
+        if self.answer=='':
+            printTime("first token")
+            clearTime()
+
+
         self.answer=f"{self.answer}{token}"
+
+        #控制向前端发送消息的频率
+        current_time = time.time() * 1000  # 获取当前时间（毫秒）
+        if current_time - self.last_post_time <= 50:  # 检查时间间隔是否至少为50ms
+            return
+        else:
+            self.last_post_time = current_time  # 更新上次发送时间
+
+
         streaming_answer={
             'message': "streaming",
             'timestamp': time.time() * 1000,
@@ -38,18 +51,6 @@ class MyStreamingHandler(StreamingStdOutCallbackHandler ):
 
         }
         response_body = json.dumps(streaming_answer)
-
-        if self.connectionId.startswith('private'):
-            api_res = requests.post(APPSYNC_ENDPOINT, headers = { 'x-api-key': APPSYNC_API_KEY }, json = {
-                "query":"mutation PublishData($name: String!, $data: AWSJSON!) { publish(name: $name, data: $data) { name data } }",
-                "variables": {
-                    "name": self.connectionId,
-                    "data": response_body,
-                }
-            })
-            self.api_res = api_res
-            return
-
         self.api_res = self.apigw_management.post_to_connection(ConnectionId=self.connectionId, Data=response_body)
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         return
