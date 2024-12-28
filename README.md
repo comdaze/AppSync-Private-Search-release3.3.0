@@ -9,7 +9,7 @@ Copyright © [Amazon.com](http://amazon.com/) and Affiliates: This deliverable i
 
 ## 方案时序图
 
-![Image1](image1.png)
+![Image1](doc/pic/image1.png)
 
 ## **1. 配置 AppSync**
 
@@ -18,15 +18,15 @@ Copyright © [Amazon.com](http://amazon.com/) and Affiliates: This deliverable i
 进入 VPC 控制台，选择 Endpoints -> Create endpoint，创建步骤如下
 首先为 endpoint 取名，Service category请选择**AWS services**，Services请选择**com.amazonaws.your-region.appsync-api**
 
-![Image1](image2.png)
+![Image1](doc/pic/image2.png)
 
 VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，此处选择了私有子网
 
-![Image1](image3.png)
+![Image1](doc/pic/image3.png)
 
 选择合适的安全组，Policy 可保持默认，检查无误后点击 Create 创建
 
-![Image1](image4.png)
+![Image1](doc/pic/image4.png)
 
 ### **1.2 在 AppSync 创建 Private WebSocket API**
 
