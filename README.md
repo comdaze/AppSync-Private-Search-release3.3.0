@@ -34,13 +34,21 @@ VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，�
 访问 AppSync 控制台，点击 APIs -> Create an API，具体步骤如下所示
 
 ![Image1](doc/pic/image5.png)
+
 ![Image1](doc/pic/image6.png)
+
 ![Image1](doc/pic/image7.png)
+
 ![Image1](doc/pic/image8.png)
+
 创建完成后，进入Settings，可以复制GraphQL endpoint（Appsync endpoint），和Real-time endpoint 后面的步骤需要用到
+
 ![Image1](doc/pic/image9.png)
+
 以及API Key
+
 ![Image1](doc/pic/image10.png)
+
 ## **2. 部署新的 lambda function**
 
 ### **2.1 部署新的private_search lambda function**
@@ -48,12 +56,19 @@ VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，�
 创建新的Lambda function，runtime选择Python 3.9
 
 ![Image1](doc/pic/image11.png)
+
 选择创建新的Role
+
 ![Image1](doc/pic/image12.png)
+
 Enable VPC，根据情况选择VPC，子网和安全组
+
 ![Image1](doc/pic/image13.png)
+
 修改这个Lambda执行Role的权限：
+
 ![Image1](doc/pic/image14.png)
+
 添加两条权限策略：
 1. 添加AmazonDynamoDBFullAccess策略文档
 2. 添加如下内联策略：
@@ -80,6 +95,7 @@ Enable VPC，根据情况选择VPC，子网和安全组
 ```
 
 ![Image1](doc/pic/image15.png)
+
 回到Lambda服务，在Code的lambda_function.py中添加如下代码：
 
 ```
@@ -148,8 +164,11 @@ def lambda_handler(event, context):
 Timeout修改为1分钟：
 
 ![Image1](doc/pic/image16.png)
+
 添加环境变量TABLE_NAME，在Dynamodb服务中找到前缀为LambdaVPCStack-websocket的表名：
+
 ![Image1](doc/pic/image17.png)
+
 最后Deploy部署这个Lambda。
 
 
@@ -158,6 +177,7 @@ Timeout修改为1分钟：
 修改Lambda langchain_processor_qa的入口lambda_function.py，添加了对 AppSync private websocket api 的支持，如下图。
 
 ![Image1](doc/pic/image18.png)
+
 在如上图位置添加如下代码：
 
 ```
@@ -168,6 +188,7 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 
 
 ![Image1](doc/pic/image19.png)
+
 如上图在sendWebSocket函数中添加如下代码，注意格式缩进
 
 ```
@@ -198,6 +219,7 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 ```
 
 ![Image1](doc/pic/image21.png)
+
 如上图位置添加如下代码，注意缩进：
 
 ```
@@ -217,15 +239,21 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 添加环境变量，APPSYNC_API_KEY, APPSYNC_ENDPOINT在以上AppSync中Settings可以获得。注意APPSYNC_ENDPOINT为GranphQL endpoint
 
 ![Image1](doc/pic/image22.png)
+
 修改完成后，点击Deploy发布。
+
 ![Image1](doc/pic/image23.png)
+
 可选：发布一个新版本：
 
 ![Image1](doc/pic/image24.png)
 
 ![Image1](doc/pic/image25.png)
+
 修改别名prod为最新发布的版本
+
 ![Image1](doc/pic/image26.png)
+
 ![Image1](doc/pic/image27.png)
 
 
@@ -236,23 +264,35 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 
 在 VPC 控制台，选择 Endpoints -> Create endpoint，创建步骤如下
 为 endpoint 取名，Service category请选择**AWS services**，Services请选择**com.amazonaws.your-region.execute-api**
+
 ![Image1](doc/pic/image28.png)
+
 VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，此处选择了私有子网，和安全组，Policy 可保持默认，检查无误后点击 Create 创建
+
 ![Image1](doc/pic/image29.png)
+
 ![Image1](doc/pic/image30.png)
 
 ### **3.2 在 API Gateway 创建 private_search REST API资源**
 
 API Gateway服务中现有的smartsearch-api中创建新的资源Resource
+
 ![Image1](doc/pic/image31.png)
+
 然后创建一个方法：
 
 ![Image1](doc/pic/image32.png)
+
 选择POST方法，集成类型选择Lambda function,开启Lambda Proxy integration，并且选择之前创建的private_search lambda，其他选项保持默认，然后创建方法。
+
 ![Image1](doc/pic/image33.png)
+
 开启CORS
+
 ![Image1](doc/pic/image34.png)
+
 选中相关选项，如下图
+
 ![Image1](doc/pic/image35.png)
 
 ![Image1](doc/pic/image36.png)
@@ -265,6 +305,7 @@ API Gateway服务中现有的smartsearch-api中创建新的资源Resource
 最后Deploy API
 
 ![Image1](doc/pic/image39.png)
+
 ![Image1](doc/pic/image40.png)
 
 可根据需求配置Resource Policy，配置完成后需要重新Deploy，例如，只允许本VPC内的资源访问此API，可以配置
@@ -300,14 +341,21 @@ API Gateway服务中现有的smartsearch-api中创建新的资源Resource
 
 可以采用WAF对API Gateway REST API和AppSync API进行保护。例如仅仅允许特定内网网段IP才可以访问：
 进入WAF服务，创建一个IP set：
+
 ![Image1](doc/pic/image41.png)
+
 进入WAF服务，创建一个WEB ACL，并且关联aws 资源：API Gateway的rest api smartsearch-api和Appsync api
 
 ![Image1](doc/pic/image42.png)
+
 下一步，增加my own rules，选择IP set
+
 ![Image1](doc/pic/image43.png)
+
 默认web ACL action 选择Block
+
 ![Image1](doc/pic/image44.png)
+
 其他选项都选择默认，最后完成创建这个Web ACL。
 
 
@@ -368,6 +416,8 @@ _另起一个terminal 2，然后执行下列查询_
 此查询会发送给 private_search REST API，后端 private_search 函数会把请求转发给 langchain_processor_qa 函数，此函数调用知识库和大模型对问题进行检索增强生成，然后将回答经由 AppSync GraphQL Endpoint -> AppSync Real-time Endpoint 发布至 websocket 客户端（terminal 1）。AppySync WebSocket 具体协议可参考[文档](https://docs.aws.amazon.com/zh_cn/appsync/latest/devguide/real-time-websocket-client.html)。
 
 在terminal 1中可以看到回复
+
 ![Image1](doc/pic/image45.png)
+
 前端可以参考https://github.com/DiscreteTom/guidance-for-custom-search-of-an-enterprise-knowledge-base-on-aws/blob/private-appsync/ui-search/src/components/Session/SessionInput.jsx 
 
