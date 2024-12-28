@@ -9,7 +9,8 @@ Copyright © [Amazon.com](http://amazon.com/) and Affiliates: This deliverable i
 
 ## 方案时序图
 
-[Image: image1.png]
+![Image1](image1.png)
+
 ## **1. 配置 AppSync**
 
 ### **1.1 为 AppSync 创建 VPC Endpoint**
