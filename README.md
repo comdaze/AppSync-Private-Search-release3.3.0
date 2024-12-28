@@ -17,28 +17,46 @@ Copyright © [Amazon.com](http://amazon.com/) and Affiliates: This deliverable i
 
 进入 VPC 控制台，选择 Endpoints -> Create endpoint，创建步骤如下
 首先为 endpoint 取名，Service category请选择**AWS services**，Services请选择**com.amazonaws.your-region.appsync-api**
-[Image: Image.jpg]
+
+![Image1](image2.png)
+
 VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，此处选择了私有子网
-[Image: Image.jpg]
+
+![Image1](image3.png)
+
 选择合适的安全组，Policy 可保持默认，检查无误后点击 Create 创建
-[Image: Image.jpg]
+
+![Image1](image4.png)
 
 ### **1.2 在 AppSync 创建 Private WebSocket API**
 
 
 访问 AppSync 控制台，点击 APIs -> Create an API，具体步骤如下所示
-[Image: Image.jpg][Image: Image.jpg][Image: Image.jpg][Image: Image.jpg]创建完成后，进入Settings，可以复制GraphQL endpoint（Appsync endpoint），和Real-time endpoint 后面的步骤需要用到
-[Image: image.png]以及API Key
-[Image: image.png]
+
+![Image1](image1.png)
+![Image1](image1.png)
+![Image1](image1.png)
+![Image1](image1.png)
+创建完成后，进入Settings，可以复制GraphQL endpoint（Appsync endpoint），和Real-time endpoint 后面的步骤需要用到
+![Image1](image1.png)
+以及API Key
+![Image1](image1.png)
 ## **2. 部署新的 lambda function**
 
 ### **2.1 部署新的private_search lambda function**
 
 创建新的Lambda function，runtime选择Python 3.9
-[Image: image.png]选择创建新的Role
-[Image: image.png]Enable VPC，根据情况选择VPC，子网和安全组
-[Image: image.png]修改这个Lambda执行Role的权限：
-[Image: image.png]添加两条权限策略：1. 添加AmazonDynamoDBFullAccess策略文档 2. 添加如下内联策略：
+
+[Image: image.png]
+选择创建新的Role
+[Image: image.png]
+Enable VPC，根据情况选择VPC，子网和安全组
+[Image: image.png]
+修改这个Lambda执行Role的权限：
+[Image: image.png]
+添加两条权限策略：
+1. 添加AmazonDynamoDBFullAccess策略文档
+2. 添加如下内联策略：
 
 ```
 {
@@ -61,7 +79,7 @@ VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，�
 }
 ```
 
-[Image: image.png]
+![Image1](image1.png)
 回到Lambda服务，在Code的lambda_function.py中添加如下代码：
 
 ```
@@ -128,14 +146,19 @@ def lambda_handler(event, context):
 ```
 
 Timeout修改为1分钟：
-[Image: image.png]添加环境变量TABLE_NAME，在Dynamodb服务中找到前缀为LambdaVPCStack-websocket的表名：
-[Image: image.png]最后Deploy部署这个Lambda。
+
+![Image1](image1.png)
+添加环境变量TABLE_NAME，在Dynamodb服务中找到前缀为LambdaVPCStack-websocket的表名：
+![Image1](image1.png)
+最后Deploy部署这个Lambda。
 
 
 ### **2.2 修改现有的 langchain_processor_qa Lambda function**
 
 修改Lambda langchain_processor_qa的入口lambda_function.py，添加了对 AppSync private websocket api 的支持，如下图。
-[Image: image.png]在如上图位置添加如下代码：
+
+![Image1](image1.png)
+在如上图位置添加如下代码：
 
 ```
 import requests
@@ -144,7 +167,8 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 ```
 
 
-[Image: image.png]如上图在sendWebSocket函数中添加如下代码，注意格式缩进
+![Image1](image1.png)
+如上图在sendWebSocket函数中添加如下代码，注意格式缩进
 
 ```
             if connectionId.startswith('private'):
@@ -162,7 +186,8 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 * * *
 修改streaming_callback_handler.py
 
-[Image: image.png]如上图位置添加如下代码
+![Image1](image1.png)
+如上图位置添加如下代码
 
 ```
 import requests
@@ -205,9 +230,9 @@ APPSYNC_API_KEY = os.environ.get('APPSYNC_API_KEY')
 
 在 VPC 控制台，选择 Endpoints -> Create endpoint，创建步骤如下
 为 endpoint 取名，Service category请选择**AWS services**，Services请选择**com.amazonaws.your-region.execute-api**
-[Image: Image.jpg]
+![Image1](image1.png)
 VPC 选择 smart search 方案所在的 VPC，子网根据实际情况选择，此处选择了私有子网，和安全组，Policy 可保持默认，检查无误后点击 Create 创建
-[Image: Image.jpg][Image: Image.jpg]
+![Image1](image1.png)![Image1](image1.png)
 
 ### **3.2 在 API Gateway 创建 private_search REST API资源**
 
@@ -225,8 +250,8 @@ API Gateway服务中现有的smartsearch-api中创建新的资源Resource
 
 最后Deploy API
 
-[Image: Image.jpg]
-[Image: Image.jpg]
+![Image1](image1.png)
+![Image1](image1.png)
 
 可根据需求配置Resource Policy，配置完成后需要重新Deploy，例如，只允许本VPC内的资源访问此API，可以配置
 
@@ -325,6 +350,6 @@ _另起一个terminal 2，然后执行下列查询_
 此查询会发送给 private_search REST API，后端 private_search 函数会把请求转发给 langchain_processor_qa 函数，此函数调用知识库和大模型对问题进行检索增强生成，然后将回答经由 AppSync GraphQL Endpoint -> AppSync Real-time Endpoint 发布至 websocket 客户端（terminal 1）。AppySync WebSocket 具体协议可参考[文档](https://docs.aws.amazon.com/zh_cn/appsync/latest/devguide/real-time-websocket-client.html)。
 
 在terminal 1中可以看到回复
-[Image: Image.jpg]
+![Image1](image1.png)
 前端可以参考https://github.com/DiscreteTom/guidance-for-custom-search-of-an-enterprise-knowledge-base-on-aws/blob/private-appsync/ui-search/src/components/Session/SessionInput.jsx 
 
